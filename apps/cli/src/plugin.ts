@@ -112,6 +112,22 @@ function anchorPathSpec(argument: string, cwd: string): string {
 }
 
 /**
+ * pnpm refuses `add`/`remove` in a workspace ROOT without an explicit `-w`
+ * (ERR_PNPM_ADDING_TO_ROOT) — and every profile directory IS a root, because
+ * `initProfile` writes its `pnpm-workspace.yaml` there. The refusal protects a
+ * human from an ambiguous cwd; `dsh plugin` has no such ambiguity (the profile
+ * root is the only thing it can mean), so the flag is supplied here instead of
+ * being pushed onto every user. A flag the caller already passed and every
+ * non-mutating command pass through untouched.
+ */
+export function withWorkspaceRoot(args: readonly string[]): string[] {
+  const MUTATING = new Set(['add', 'remove', 'rm', 'uninstall'])
+  const command = args.find(argument => !argument.startsWith('-'))
+  if (command === undefined || !MUTATING.has(command)) return [...args]
+  return args.includes('-w') || args.includes('--workspace-root') ? [...args] : [...args, '-w']
+}
+
+/**
  * Run one `dsh plugin` invocation: init if needed, forward to pnpm, reconcile.
  * @param profile - the profile name.
  * @param args - pnpm arguments with relative path specs anchored to the invoking directory.
@@ -131,7 +147,7 @@ export function runPlugin(profile: string, args: readonly string[]): number {
   const before = readProfileManifest(NAME, dir)
   // Windows resolves pnpm through its .cmd shim, which spawn() refuses
   // without a shell since the CVE-2024-27980 hardening.
-  const result = spawnSync('pnpm', args.map(argument => anchorPathSpec(argument, process.cwd())), {
+  const result = spawnSync('pnpm', withWorkspaceRoot(args).map(argument => anchorPathSpec(argument, process.cwd())), {
     cwd: dir,
     stdio: 'inherit',
     shell: process.platform === 'win32',
