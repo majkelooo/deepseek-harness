@@ -1,5 +1,16 @@
 # AGENTS.md
 
+<!-- AUTO:RULES:START -->
+## Rules for this repository
+
+Read each file below before working; they are the project's standing rules, mirrored into
+`.claude/rules/` for Claude Code and listed here for hosts that read only this file.
+
+- `.claude/rules/cbc-brief-schema.md` - CBC Brief Schema — session card
+- `.claude/rules/cbc-engineering-essentials.md` - Engineering essentials — read before writing, not after
+- `.claude/rules/karpathy-coding-principles.md` - Karpathy Coding Principles
+<!-- AUTO:RULES:END -->
+
 DeepSeek Harness is an all-plugin Cordis agent harness. Read [docs/architecture.md](docs/architecture.md) before changing `packages/`; follow [docs/AGENTS.md](docs/AGENTS.md) for documentation.
 
 ## Pre-stable APIs and released Session data
