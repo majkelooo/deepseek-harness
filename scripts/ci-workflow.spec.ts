@@ -190,7 +190,7 @@ describe('CI workflow', () => {
       expect(job['runs-on']).toContain('dsh-win-ci')
       expect(job['runs-on']).toContain('dsh-windows-2025-16core')
       expect(job['runs-on']).toContain('blacksmith-16vcpu-windows-2025')
-      expect(job.if).toBe("github.event_name == 'pull_request'")
+      expect(job.if).toBe("github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'")
     }
 
     // windows-build runs the blocking build/site pair.
@@ -264,7 +264,7 @@ describe('CI workflow', () => {
     expect(windowsObservational['continue-on-error']).toBe(true)
 
     // serial-windows: master-only standby, self-hosted, non-blocking, lives in ci-master.
-    expect(serialWindows.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+    expect(serialWindows.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.DSH_SELF_HOSTED == 'true'")
     expect(serialWindows['runs-on']).toEqual(['self-hosted', 'dsh-win-ci', 'windows'])
     expect(serialWindows.name).toBe('serial / windows (self-hosted standby)')
     // Its store must share the ReFS workspace volume for clone; the install
@@ -330,6 +330,7 @@ describe('CI workflow', () => {
       expect(job['runs-on'], `${jobName} runs-on must not use the Windows failover switch`).not.toContain('DSH_CI_FAILOVER_WINDOWS')
       expect(job['runs-on']).toContain('vm-backup')
       expect(job['runs-on']).toContain('blacksmith-16vcpu-ubuntu-2404')
+      expect(job.if).toBe("github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'")
     }
     expect(aggregate['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
     expect(aggregate['runs-on']).not.toContain('DSH_CI_FAILOVER_WINDOWS')
@@ -495,13 +496,13 @@ describe('CI workflow', () => {
       if (!isRecord(job)) throw new TypeError(`${name} must be defined`)
       expect(job.concurrency).toBeUndefined()
       // Standby drills remain post-merge work, but share run cancellation.
-      expect(job.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+      expect(job.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.DSH_SELF_HOSTED == 'true'")
     }
 
     // Pin the post-merge runtime, Wine, and standby inventory.
     const NOT_PUSH_REACHABLE = new Set([
-      "github.event_name == 'workflow_dispatch' && inputs.suite == 'larger-runner-benchmark'",
-      "github.event_name == 'workflow_dispatch' && inputs.suite == 'consolidated-runner-benchmark'",
+      "github.event_name == 'workflow_dispatch' && inputs.suite == 'larger-runner-benchmark' && vars.DSH_SELF_HOSTED == 'true'",
+      "github.event_name == 'workflow_dispatch' && inputs.suite == 'consolidated-runner-benchmark' && vars.DSH_SELF_HOSTED == 'true'",
     ])
     const pushReachable = Object.entries(workflow.jobs)
       .filter(([, job]) => {
@@ -573,7 +574,7 @@ describe('CI workflow', () => {
     }
 
     expect(pythonRuntime).toMatchObject({
-      if: "github.event_name == 'pull_request'",
+      if: "github.event_name == 'pull_request' && vars.DSH_REAL_API == 'true'",
       name: 'python runtime / release-shaped matrix',
       uses: './.github/workflows/build-exe-for-python-sdk.yml',
       with: {
@@ -977,6 +978,7 @@ describe('Issue lifecycle workflow', () => {
 
     expect(lifecycle.on).toHaveProperty('pull_request')
     expect(lifecycle.on).toHaveProperty('pull_request_review')
+    expect(lifecycleJob.if).toContain("github.repository == 'deepseek-harness/deepseek-harness'")
     expect(lifecycleJob.if).toContain("github.event.review.state == 'changes_requested'")
     expect(lifecycleJob.if).toContain('github.event.changes.body != null')
     // Keep the subscription-type gates: issue-lifecycle does not re-subscribe
@@ -1019,7 +1021,7 @@ describe('Issue lifecycle workflow', () => {
     expect(preflightStep?.run).toContain('if [ -f .github/issue-management/selective-preflight.json ]; then')
     expect(preflightStep?.run).toContain('node .github/issue-management/policy.mjs pr-preflight')
     expect(preflightStep?.if).toBeUndefined()
-    expect(policyJob.if).toBeUndefined()
+    expect(policyJob.if).toBe("github.repository == 'deepseek-harness/deepseek-harness'")
     expect(validateStep?.if).toBe("${{ steps.preflight.outputs.legacy-automated != 'true' }}")
 
     expect(tokenStep).toMatchObject({

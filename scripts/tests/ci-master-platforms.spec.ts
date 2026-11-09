@@ -61,8 +61,8 @@ describe('master-only platform scheduling', () => {
       expect(evaluateCondition(condition, false, results)).toBe(true)
       expect(evaluateCondition(condition, true, results)).toBe(false)
       expect(evaluateCondition(condition, false, results, 'push')).toBe(false)
-      const failureStep = aggregate.steps!.find(step => step.name === 'Fail if any needed job did not succeed')!
-      expect(evaluateCondition(failureStep.if!, false, results)).toBe(result !== 'success')
+      const failureStep = aggregate.steps!.find(step => step.name === 'Fail if any needed job failed or was cancelled')!
+      expect(evaluateCondition(failureStep.if!, false, results)).toBe(result === 'failure' || result === 'cancelled')
       expect(failureStep.run).toContain('exit 1')
     },
   )
@@ -76,7 +76,7 @@ describe('master-only platform scheduling', () => {
     const pr = workflow('ci.yml')
     expect(Object.keys(pr.on)).toEqual(['pull_request'])
     expect(pr.jobs['python-runtime']).toMatchObject({
-      if: "github.event_name == 'pull_request'",
+      if: "github.event_name == 'pull_request' && vars.DSH_REAL_API == 'true'",
       uses: runtimeBuilder,
       with: { ci: true, targets: 'node24-linux-x64,node24-win-x64' },
     })
@@ -88,7 +88,7 @@ describe('master-only platform scheduling', () => {
     expect(aggregate.needs!.every(id => id in pr.jobs)).toBe(true)
     expect(aggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}")
     expect(aggregate.steps).toContainEqual(expect.objectContaining({
-      if: "contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')",
+      if: "contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')",
     }))
   })
 
@@ -98,7 +98,7 @@ describe('master-only platform scheduling', () => {
     expect(Object.keys(master.on).sort()).toEqual(['push', 'workflow_dispatch'])
     const runtime = master.jobs['python-runtime']!
     expect(runtime).toMatchObject({
-      if: masterPush,
+      if: `${masterPush} && vars.DSH_REAL_API == 'true'`,
       uses: runtimeBuilder,
       with: { ci: true, targets: 'node24-linux-arm64,node24-macos-arm64,node24-macos-x64' },
       secrets: { DEEPSEEK_API_KEY_EXTERNAL: '${{ secrets.DEEPSEEK_API_KEY_EXTERNAL }}' },

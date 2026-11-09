@@ -40,7 +40,8 @@ jobs:
   # switch is the separate DSH_CI_FAILOVER_WINDOWS variable on the windows-native
   # job below.
   node-24:
-    if: github.event_name == 'pull_request'
+    # Repositories without the named fleet pools leave DSH_SELF_HOSTED unset.
+    if: github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_LINUX == 'blacksmith' && 'blacksmith-16vcpu-ubuntu-2404'
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
@@ -107,7 +108,8 @@ jobs:
         run: pnpm run check:ci:static
 
   node-24-coverage:
-    if: github.event_name == 'pull_request'
+    # Repositories without the named fleet pools leave DSH_SELF_HOSTED unset.
+    if: github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_LINUX == 'blacksmith' && 'blacksmith-16vcpu-ubuntu-2404'
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
@@ -237,7 +239,8 @@ jobs:
         run: pnpm run check:ci:bench
 
   node-24-consumers:
-    if: github.event_name == 'pull_request'
+    # Repositories without the named fleet pools leave DSH_SELF_HOSTED unset.
+    if: github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_LINUX == 'blacksmith' && 'blacksmith-16vcpu-ubuntu-2404'
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
@@ -472,7 +475,8 @@ jobs:
   # keyless black-box, and trusted real-API path. Linux/Windows x64 block PRs;
   # Linux ARM64 and both macOS architectures run in ci-master.yml.
   python-runtime:
-    if: github.event_name == 'pull_request'
+    # Repositories without the real-API secret leave DSH_REAL_API unset; the builder's key preflight stays fail-loud.
+    if: github.event_name == 'pull_request' && vars.DSH_REAL_API == 'true'
     name: python runtime / release-shaped matrix
     uses: ./.github/workflows/build-exe-for-python-sdk.yml
     with:
@@ -488,7 +492,8 @@ jobs:
   # Dependabot PRs are excluded from the self-hosted pool and stay queued for
   # the hosted runner.
   windows-build:
-    if: github.event_name == 'pull_request'
+    # Repositories without the named fleet pools leave DSH_SELF_HOSTED unset.
+    if: github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'blacksmith' && 'blacksmith-16vcpu-windows-2025'
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
@@ -533,7 +538,8 @@ jobs:
         run: pnpm run check:ci:windows-blocking
 
   windows-coverage:
-    if: github.event_name == 'pull_request'
+    # Repositories without the named fleet pools leave DSH_SELF_HOSTED unset.
+    if: github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'blacksmith' && 'blacksmith-16vcpu-windows-2025'
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
@@ -610,7 +616,8 @@ jobs:
           key: coverage-times-${{ github.run_id }}
 
   windows-native-tests:
-    if: github.event_name == 'pull_request'
+    # Repositories without the named fleet pools leave DSH_SELF_HOSTED unset.
+    if: github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'blacksmith' && 'blacksmith-16vcpu-windows-2025'
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
@@ -659,7 +666,8 @@ jobs:
           packages/subprocess/subprocess-local/tests/process-exit.spec.ts
 
   windows-observational:
-    if: github.event_name == 'pull_request'
+    # Repositories without the named fleet pools leave DSH_SELF_HOSTED unset.
+    if: github.event_name == 'pull_request' && vars.DSH_SELF_HOSTED == 'true'
     continue-on-error: true
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'blacksmith' && 'blacksmith-16vcpu-windows-2025'
@@ -731,10 +739,11 @@ jobs:
     needs: [node-24, node-24-coverage, node-24-bench, node-24-consumers, node-compat, python-sdk, python-runtime, windows-build, windows-native-tests]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     steps:
-      - name: Fail if any needed job did not succeed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+      # A skipped need is a repository-variable guard; failure and cancellation still fail the verdict.
+      - name: Fail if any needed job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: |
           echo "::error::Needed job results: ${{ join(needs.*.result, ', ') }}"
           exit 1
       - name: All checks passed
-        run: echo "All needed jobs succeeded (${{ join(needs.*.result, ', ') }})"
+        run: echo "No needed job failed or was cancelled (${{ join(needs.*.result, ', ') }})"

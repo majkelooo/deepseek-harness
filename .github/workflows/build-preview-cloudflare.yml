@@ -32,6 +32,8 @@ env:
 
 jobs:
   preview:
+    # Upstream-only: needs upstream secrets, GitHub App, or repository identity.
+    if: github.repository == 'deepseek-harness/deepseek-harness'
     runs-on: ubuntu-24.04
     name: cloudflare pages preview
     steps:
