@@ -58,7 +58,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 | Your hook | When it runs | What it can do |
 |---|---|---|
 | `SessionStart` | when a session starts | attach context the model sees in that session |
-| `UserPromptSubmit` | when the agent receives a prompt | block the prompt, or attach extra context |
+| `UserPromptSubmit` | when the agent receives operator input | block the prompt, or attach extra context |
 | `PreToolUse` | before a tool runs | block the tool, or ask for approval before it runs |
 | `PostToolUse` | after a tool runs | block the result with feedback, or attach extra context |
 | `Stop` | when the run is about to stop | force another step with a reason |
@@ -68,6 +68,8 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 ### How hooks run and fail
 
 - Hooks run in the agent's current Session directory; `pwd`, payload `cwd`, and relative paths agree.
+- `UserPromptSubmit` sees operator input only. The pre-step queue can also carry machine-fed messages (instruction reminders, injected context, tool results); those never reach prompt hooks, matching Claude Code, which runs the hook for submitted prompts only.
+- Tool hooks see Claude Code tool names: a DSH tool with a CC counterpart (`bash`→`Bash`, `read`/`write`/`edit`/`grep`/`glob`→capitalized, `subagent`/`subagent_fork`→`Agent`, `todo_write`→`TodoWrite`, `ask_user_question`→`AskUserQuestion`, `web_search`/`web_fetch`→capitalized) reports that name as the matcher subject and `tool_name`, so an unmodified `hooks.json` matcher like `Bash` or `Read|Write|Edit` selects it. Tools without a CC counterpart keep their DSH name.
 - `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PROJECT_DIR}` in command strings are replaced from your config, and `CLAUDE_PROJECT_DIR` is set for every hook process.
 - One config applies to the whole process: it is read once at startup, and a relative `configPath` resolves from the directory that launched the process.
 - Hooks on the same event run one after another, in config order.

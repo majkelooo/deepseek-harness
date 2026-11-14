@@ -478,3 +478,72 @@ describe('hooks-claude-code bridge — load resilience', () => {
     expect(typeof unwrapped.apply).toBe('function')
   })
 })
+
+// A machine-fed inbox entry (the shape instruction reminders and injected context use):
+// UserPromptSubmit must not run for it — Claude Code runs that hook for operator
+// input only, and running it on machine text re-classifies a reminder as a prompt.
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'test-machine-fed': { kind: 'test-machine-fed' }
+  }
+}
+
+describe('hooks-claude-code bridge — prompt subject and tool names', () => {
+  it('a machine-fed message never reaches UserPromptSubmit hooks', async () => {
+    const dir = writeConfig(
+      { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'exit 2' }] }] },
+    )
+    const adapter = new MockAdapter([textResponse('ok')])
+    const ctx = await harness(dir, adapter)
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('m1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'system-reminder: new instructions' }], source: { kind: 'test-machine-fed' } }))
+    await waitForIdle(ctx, agent)
+
+    // The machine message reached the model, but no prompt hook ran for it.
+    expect(adapter.requests).toHaveLength(1)
+    expect(events(agent).some(e => e.type === 'hook/invoked')).toBe(false)
+  })
+
+  it('a mixed batch delivers only the operator text to the prompt hook', async () => {
+    const capture = join(writeConfig({}), 'payload.json')
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const spy = join(dir, 'spy.sh')
+    writeFileSync(spy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(capture)}\n`)
+    chmodSync(spy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: spy }] }] } }))
+
+    const adapter = new MockAdapter([textResponse('ok')])
+    const ctx = await harness(dir, adapter)
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('m2'), { provider: 'mock', model: 'mock' })
+    // Operator text second so ordering alone could not produce the assertion.
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'machine preamble' }], source: { kind: 'test-machine-fed' } }))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'the real prompt' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const payload = JSON.parse(readFileSync(capture, 'utf8'))
+    expect(payload.prompt).toBe('the real prompt')
+  })
+
+  it('a Claude Code matcher selects the DSH tool by its CC name, and the payload carries it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const capture = join(dir, 'payload.json')
+    const spy = join(dir, 'spy.sh')
+    writeFileSync(spy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(capture)}\n`)
+    chmodSync(spy, 0o755)
+    // `Bash` is a case-sensitive literal matcher: without the canonical name the
+    // DSH `bash` tool would not match and the hook would never run.
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: spy }] }] } }))
+
+    const adapter = new MockAdapter([toolCallResponse('c1', 'bash', { command: 'true' }), textResponse('done')])
+    const ctx = await harness(dir, adapter)
+    ctx.tools.register(defineContentToolFixture({ name: 'bash', description: 'b', parameters: {}, async execute() { return [{ type: 'text', text: 'ran' }] } }))
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('m3'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const payload = JSON.parse(readFileSync(capture, 'utf8'))
+    expect(payload.tool_name).toBe('Bash')
+  })
+})

@@ -225,8 +225,14 @@ export function apply(ctx: Context, config: Config): void {
   // --- UserPromptSubmit → PreStepDecision. The prompt text is the payload; no
   // matcher subject (CC ignores matchers for this event). ---
   ctx.on('agent/pre-step', async ({ agent, messages, turn, signal }, next): Promise<PreStepDecision> => {
-    if (messages.length === 0) return next()
-    const content = messages.flatMap(message => message.content)
+    // Claude Code runs UserPromptSubmit for operator input only. The pre-step queue
+    // also carries machine-fed messages (instruction reminders, injected context,
+    // tool results); handing those to prompt hooks let a spliced system-reminder
+    // classify machine text as a new prompt and inject a second, misrouted context
+    // pack inside one turn (measured 2026-11-14 on a CBC bridge deployment).
+    const operatorMessages = messages.filter(isOperatorInput)
+    if (operatorMessages.length === 0) return next()
+    const content = operatorMessages.flatMap(message => message.content)
     const merged = await runPoint('UserPromptSubmit', '', promptPayload(agent, content), { agent, turn, signal })
     if (merged.decision === 'deny') {
       return { kind: 'reject' }
@@ -245,7 +251,7 @@ export function apply(ctx: Context, config: Config): void {
   // --- PreToolUse → PreToolDecision. Matcher subject is the tool name. ---
   ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
     const turn = lastTurn(ctx, exec.agent)
-    const merged = await runPoint('PreToolUse', exec.name, preToolPayload(exec), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
+    const merged = await runPoint('PreToolUse', ccToolName(exec.name), preToolPayload(exec), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
     if (merged.decision === 'deny') return { kind: 'deny', reason: merged.reason ?? 'blocked by PreToolUse hook', info: { name: HOOK_ERROR_NAME, code: HOOK_DENIED } }
     if (merged.decision === 'ask') return { kind: 'ask', ...merged.reason !== undefined ? { reason: merged.reason } : {} }
     return next()
@@ -254,7 +260,7 @@ export function apply(ctx: Context, config: Config): void {
   // --- PostToolUse → PostToolDecision. Matcher subject is the tool name. ---
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
     const turn = lastTurn(ctx, exec.agent)
-    const merged = await runPoint('PostToolUse', exec.name, postToolPayload(exec, result), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
+    const merged = await runPoint('PostToolUse', ccToolName(exec.name), postToolPayload(exec, result), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
     const context = contextFrom(merged)
     if (merged.decision === 'deny') {
       return {
@@ -332,6 +338,40 @@ function blocksToText(content: ContentBlock[]): string {
   return content.filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text').map(b => b.text).join('')
 }
 
+/** Operator-authored input — the only subject Claude Code's UserPromptSubmit covers. */
+function isOperatorInput(message: UserMessage): boolean {
+  return message.source.kind === 'user'
+}
+
+/**
+ * DSH tool names are lower-case; Claude Code matchers are case-sensitive literal
+ * alternations over CC tool names (`Bash`, `Read|Write|Edit`, …), and CC hooks
+ * branch on `tool_name` the same way. Map each DSH tool with a Claude Code
+ * counterpart to that name for both matcher selection and the payload's
+ * `tool_name`, so an unmodified hooks.json selects and drives the same hooks it
+ * does under Claude Code. Tools without a CC counterpart pass through
+ * unchanged; both subagent tools collapse onto the one CC agent-tool name.
+ */
+const CC_TOOL_NAMES: Readonly<Record<string, string>> = {
+  bash: 'Bash',
+  read: 'Read',
+  write: 'Write',
+  edit: 'Edit',
+  grep: 'Grep',
+  glob: 'Glob',
+  subagent: 'Agent',
+  subagent_fork: 'Agent',
+  todo_write: 'TodoWrite',
+  ask_user_question: 'AskUserQuestion',
+  web_search: 'WebSearch',
+  web_fetch: 'WebFetch',
+}
+
+/** The Claude Code tool name a DSH tool reports to hooks and matchers. */
+function ccToolName(name: string): string {
+  return CC_TOOL_NAMES[name] ?? name
+}
+
 function base(agent: Agent | undefined, event: string): Record<string, unknown> {
   return {
     session_id: agent?.session.header.id ?? '',
@@ -349,10 +389,10 @@ function promptPayload(agent: Agent, content: ContentBlock[]): Record<string, un
   return { ...base(agent, 'UserPromptSubmit'), prompt: blocksToText(content) }
 }
 function preToolPayload(exec: ToolExecution): Record<string, unknown> {
-  return { ...base(exec.agent, 'PreToolUse'), tool_name: exec.name, tool_input: exec.arguments, tool_use_id: exec.callId }
+  return { ...base(exec.agent, 'PreToolUse'), tool_name: ccToolName(exec.name), tool_input: exec.arguments, tool_use_id: exec.callId }
 }
 function postToolPayload(exec: ToolExecution, result: ToolExecutionResult): Record<string, unknown> {
-  return { ...base(exec.agent, 'PostToolUse'), tool_name: exec.name, tool_input: exec.arguments, tool_use_id: exec.callId, tool_response: blocksToText(result.content) }
+  return { ...base(exec.agent, 'PostToolUse'), tool_name: ccToolName(exec.name), tool_input: exec.arguments, tool_use_id: exec.callId, tool_response: blocksToText(result.content) }
 }
 function stopPayload(agent: Agent): Record<string, unknown> {
   return { ...base(agent, 'Stop'), stop_hook_active: false }
