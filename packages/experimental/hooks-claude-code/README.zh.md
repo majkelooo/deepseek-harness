@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-hooks-claude-code` 在 agent（智能体）运行期间执行你现有 Claude Code `hooks.json` 或 settings 文件中的 command 钩子，无需重写。受支持的钩子会在会话、提示词、工具、停止或 subagent 到达对应时刻时运行。它们可以带模型可见的原因阻塞提示词或工具调用、添加对话上下文，或强制模型再执行一个轮次。需要在 harness 中复用 Claude Code command 钩子时选择本包；没有 Claude Code 对应物的行为应使用原生插件。
+`dsh-hooks-claude-code` 在 agent（智能体）运行期间执行你现有 Claude Code `hooks.json` 或 settings 文件中的 command 钩子，无需重写。受支持的钩子会在会话、提示词、工具（含失败）、压缩（compaction）边界、停止或 subagent 到达对应时刻时运行。它们可以带模型可见的原因阻塞提示词或工具调用、添加对话上下文，或强制模型再执行一个轮次。需要在 harness 中复用 Claude Code command 钩子时选择本包；没有 Claude Code 对应物的行为应使用原生插件。
 
 ## 目录
 
@@ -58,16 +58,23 @@ kind: "package-reference"
 | 你的钩子 | 运行时机 | 能做什么 |
 |---|---|---|
 | `SessionStart` | 会话开始时 | 附加该会话中模型可见的上下文 |
-| `UserPromptSubmit` | agent 收到提示词时 | 阻塞提示词，或附加上下文 |
+| `UserPromptSubmit` | agent 收到操作者输入时 | 阻塞提示词，或附加上下文 |
 | `PreToolUse` | 工具运行前 | 阻塞工具，或在运行前请求批准 |
-| `PostToolUse` | 工具运行后 | 带反馈阻塞结果，或附加上下文 |
+| `PostToolUse` | 工具成功完成后 | 带反馈阻塞结果，或附加上下文 |
+| `PostToolUseFailure` | 已启动的工具失败后 | 在错误旁附加上下文（观测） |
 | `Stop` | 运行即将停止时 | 带原因强制再执行一步 |
 | `SubagentStart` | subagent 启动时 | 向仍在运行的 subagent 附加上下文（仅限同进程） |
 | `SubagentStop` | subagent 结束时 | 只观测——不能阻塞或添加上下文 |
+| `PreCompact` | 压缩事务开启时 | 只观测——无法阻塞压缩 |
+| `PostCompact` | 压缩提交后 | 只观测——对压缩后的状态作出反应 |
 
 ### 钩子如何运行与失败
 
 - 钩子在 agent 的 Session 当前目录中运行；`pwd`、载荷中的 `cwd` 与相对路径保持一致。
+- `UserPromptSubmit` 只看到操作者输入。pre-step 队列还会携带机器投递的消息（指令提醒、注入上下文、工具结果）；它们不会到达提示词 hook，与 Claude Code 一致——它只对已提交的提示词运行该 hook。
+- 工具 hook 使用 Claude Code 工具名：有 CC 对应物的 DSH 工具（`bash`→`Bash`、`read`/`write`/`edit`/`grep`/`glob`→首字母大写、`subagent`/`subagent_fork`→`Agent`、`todo_write`→`TodoWrite`、`ask_user_question`→`AskUserQuestion`、`web_search`/`web_fetch`→首字母大写）在 matcher subject 与 `tool_name` 中报告该名称，因此未改动的 `hooks.json` matcher（如 `Bash` 或 `Read|Write|Edit`）可以选中它。没有 CC 对应物的工具保留 DSH 名称。
+- 失败的工具调用路由到 `PostToolUseFailure`，永远不会到 `PostToolUse`（后者只对成功调用触发）。分派前取消、本桥接自身的 `PreToolUse` 拒绝与审批拒绝会在不触发任何事件的情况下停止调用；其他 DSH 策略拒绝（例如 sandbox 守卫）会触发失败事件，这与 Claude Code 存在差异——后者只对已启动的工具主体触发该事件。
+- 压缩 hook 观测持久化 compaction 标记：matcher subject 是触发方式——轮次间的独立压缩为 `manual`，开放轮次内的压力压缩为 `auto`。
 - 命令字符串中的 `${CLAUDE_PLUGIN_ROOT}` 与 `${CLAUDE_PROJECT_DIR}` 会按你的配置替换，且每个钩子进程都会设置 `CLAUDE_PROJECT_DIR`。
 - 一份配置应用于整个进程：启动时只读取一次，相对 `configPath` 从启动进程的目录解析。
 - 同一事件上的钩子按配置顺序逐个运行。
@@ -86,7 +93,7 @@ kind: "package-reference"
 
 ### Hook 点映射
 
-每个受支持事件都面向一个 harness 扩展点：`SessionStart` 在首个轮次前通过需等待的 `agent/created` 初始化加入上下文，`UserPromptSubmit` 与 `PreToolUse` 是能拒绝传入动作的 waterfall（瀑布式事件）（`agent/pre-step`、`tools/pre-execute`），`PostToolUse` 是能带反馈阻塞或向下游决策添加上下文的 waterfall（`tools/post-execute`），`Stop` 是串行监听器，其阻塞结果通过 `steer()` 强制再执行一步（`agent/turn-stopping`）。两个 subagent 事件面向 child 生命周期发射（`subagent/start`、`subagent/end`）：start 向仍在运行的同进程 child 注入上下文，stop 只观测。仅提供上下文的 hook 总是先通过 `next()` 委托，再把带来源的消息折叠进下游决策，因此后续监听器仍可拒绝或改写；阻塞决策映射为 `deny`（`PreToolUse` 为 `ask`）。逐事件接线位于 [`src/index.ts`](src/index.ts)。
+每个受支持事件都面向一个 harness 扩展点：`SessionStart` 在首个轮次前通过需等待的 `agent/created` 初始化加入上下文，`UserPromptSubmit` 与 `PreToolUse` 是能拒绝传入动作的 waterfall（瀑布式事件）（`agent/pre-step`、`tools/pre-execute`），`PostToolUse` 是能带反馈阻塞或向下游决策添加上下文的 waterfall（`tools/post-execute`），`Stop` 是串行监听器，其阻塞结果通过 `steer()` 强制再执行一步（`agent/turn-stopping`）。`tools/post-execute` 上的失败结果路由到 `PostToolUseFailure`，其上下文折叠进下游决策（调用已经失败，没有可阻塞的对象）。两个 subagent 事件面向 child 生命周期发射（`subagent/start`、`subagent/end`）：start 向仍在运行的同进程 child 注入上下文，stop 只观测。压缩事件观测提交后的 `session/event` 流：`compaction/start` 映射到 `PreCompact`，成功的 `compaction/end` 映射到 `PostCompact`，两者均脱离运行。仅提供上下文的 hook 总是先通过 `next()` 委托，再把带来源的消息折叠进下游决策，因此后续监听器仍可拒绝或改写；阻塞决策映射为 `deny`（`PreToolUse` 为 `ask`）。逐事件接线位于 [`src/index.ts`](src/index.ts)。
 
 ### 载荷与环境
 
@@ -94,11 +101,11 @@ kind: "package-reference"
 
 ### Matcher subject 与串行执行
 
-matcher subject 是工具名称（`PreToolUse`／`PostToolUse`）、会话源（`SessionStart`），或常量 `agent_type` `general-purpose`（`SubagentStart`／`SubagentStop`——subagent seam 不携带每 kind 标签）；`UserPromptSubmit` 与 `Stop` 忽略 matcher。匹配 hook 按配置顺序串行运行，这使每个 hook 的 `hook/invoked`／`hook/result` 对在日志中相邻，且最严格折叠与顺序无关（`deny > ask > allow`）。
+matcher subject 是工具名称（`PreToolUse`／`PostToolUse`／`PostToolUseFailure`）、会话源（`SessionStart`）、压缩触发方式 `manual`/`auto`（`PreCompact`／`PostCompact`），或常量 `agent_type` `general-purpose`（`SubagentStart`／`SubagentStop`——subagent seam 不携带每 kind 标签）；`UserPromptSubmit` 与 `Stop` 忽略 matcher。匹配 hook 按配置顺序串行运行，这使每个 hook 的 `hook/invoked`／`hook/result` 对在日志中相邻，且最严格折叠与顺序无关（`deny > ask > allow`）。
 
 ### 脱离运行与释放
 
-三个 emit 点（`SessionStart`、`SubagentStart`、`SubagentStop`）以脱离方式运行——没有扩展点等待它们。每条运行链都会被跟踪，对桥接执行 dispose（资源释放）时会中止仍在运行的 hook 进程，并在 dispose 完成前排空 continuation（`createDetachedRuns`，位于 `dsh-hook-protocol`）。
+emit 点（`SessionStart`、`SubagentStart`、`SubagentStop`、`PreCompact`、`PostCompact`）以脱离方式运行——没有扩展点等待它们。每条运行链都会被跟踪，对桥接执行 dispose（资源释放）时会中止仍在运行的 hook 进程，并在 dispose 完成前排空 continuation（`createDetachedRuns`，位于 `dsh-hook-protocol`）。
 
 ### 设计理念
 
@@ -141,7 +148,7 @@ matcher subject 是工具名称（`PreToolUse`／`PostToolUse`）、会话源（
 
 #### 模型看到什么
 
-`SessionStart`、已接受提示词、工具后与实时同进程 subagent-start hook 可以添加带源归因的上下文消息；阻塞 `Stop` hook 将原因添加为下一步 steering（中途引导）。远程 child 注入没有本地目标。
+`SessionStart`、已接受提示词、工具后（含失败）与实时同进程 subagent-start hook 可以添加带源归因的上下文消息；阻塞 `Stop` hook 将原因添加为下一步 steering（中途引导）。远程 child 注入没有本地目标。
 
 #### Token 影响
 
@@ -155,7 +162,7 @@ hook 不返回上下文时没有成本。Hook 文本取决于数据，会被记�
 
 #### 模型看到什么
 
-提供方提供的原因逐字传递。缺失原因时，已拒绝工具变为 `Error: blocked by PreToolUse hook`，已阻塞工具后反馈精确为 `blocked by PostToolUse hook`，阻塞 stop 则精确添加 steering `continue: blocked by Stop hook`；已阻塞提示词不会产生任何模型可见消息，而是以 `blocked` 结束该轮次。已拒绝的工具调用在 `tool/result` 上记录 `HookError` 与 `HOOK_DENIED`，已阻塞的工具后结果记录 `HookError` 与 `HOOK_BLOCKED`。`systemMessage` 与 `updatedInput` 会被记录或警告，但在此实现中对模型不可见。
+提供方提供的原因逐字传递。缺失原因时，已拒绝工具变为 `Error: blocked by PreToolUse hook`，已阻塞工具后反馈精确为 `blocked by PostToolUse hook`，阻塞 stop 则精确添加 steering `continue: blocked by Stop hook`；已阻塞提示词不会产生任何模型可见消息，而是以 `blocked` 结束该轮次。已拒绝的工具调用在 `tool/result` 上记录 `HookError` 与 `HOOK_DENIED`，已阻塞的工具后结果记录 `HookError` 与 `HOOK_BLOCKED`。`systemMessage` 会被警告并记录到 `hook/result`（永远不对模型可见），`updatedInput` 会被记录 + 警告但不应用。
 
 #### Token 影响
 
@@ -172,14 +179,16 @@ hook 不返回上下文时没有成本。Hook 文本取决于数据，会被记�
 
 这些限制描述你的 Claude Code 钩子目前还无法通过本桥接做到的事情，以及行为与参考工具的差异。它们是当前包约束，而非任务积压。
 
-- **不支持的 hook 事件（Claude Code 当前 30 项中的 23 项）**——`Setup`、`InstructionsLoaded`、`UserPromptExpansion`、`MessageDisplay`、`PermissionRequest`、`PostToolUseFailure`、`PostToolBatch`、`PermissionDenied`、`Notification`、`TaskCreated`、`TaskCompleted`、`StopFailure`、`TeammateIdle`、`ConfigChange`、`CwdChanged`、`FileChanged`、`WorktreeCreate`、`WorktreeRemove`、`PreCompact`、`PostCompact`、`SessionEnd`、`Elicitation` 与 `ElicitationResult`。这些事件的配置会在配置组解析前被忽略，因此不支持的事件既不会使配置失效，也不会注册 hook。比较基线是 Claude Code [官方 hook 事件参考](https://code.claude.com/docs/en/hooks#hook-events)。
+- **不支持的 hook 事件（Claude Code 当前 30 项中的 20 项）**——`Setup`、`InstructionsLoaded`、`UserPromptExpansion`、`MessageDisplay`、`PermissionRequest`、`PostToolBatch`、`PermissionDenied`、`Notification`、`TaskCreated`、`TaskCompleted`、`StopFailure`、`TeammateIdle`、`ConfigChange`、`CwdChanged`、`FileChanged`、`WorktreeCreate`、`WorktreeRemove`、`SessionEnd`、`Elicitation` 与 `ElicitationResult`。这些事件的配置会在配置组解析前被忽略，因此不支持的事件既不会使配置失效，也不会注册 hook。比较基线是 Claude Code [官方 hook 事件参考](https://code.claude.com/docs/en/hooks#hook-events)。
 - **`SessionStart` 只支持部分功能**——会消费 JSON `additionalContext`，但不支持纯 stdout 上下文、`initialUserMessage`、`sessionTitle`、`watchPaths`、`reloadSkills` 与 `CLAUDE_ENV_FILE`。hook 脱离运行，因此上下文可能错过第一个请求，payload 会省略 `model`、`agent_type` 与 `session_title` 等可选字段。
 - **`UserPromptSubmit` 只支持部分功能**——支持阻塞与 JSON `additionalContext`，但不支持纯 stdout 上下文、`sessionTitle` 与 `suppressOriginalPrompt`。除非被覆盖，否则桥接还会使用自身 600 秒默认值，而非 Claude Code 的事件特定 30 秒 command 超时。
 - **`PreToolUse` 只支持部分功能**——`deny` 与 `ask` 决策可用；`allow` 不会预审批，`defer` 不受支持，`additionalContext` 会被忽略，`updatedInput` 会被记录 + 警告但不应用（见 [pre-tool-input-rewrite Agent Note](../../../.agents/notes/proposed/feature/2026-06-30-pre-tool-input-rewrite.zh.md)）。
-- **`PostToolUse` 只支持部分功能**——支持阻塞反馈与 JSON `additionalContext`，但不支持 `updatedToolOutput` 与 `updatedMCPToolOutput`，`tool_response` 会展平为文本。
+- **`PostToolUse` 只支持部分功能**——只对成功调用触发（失败调用路由到 `PostToolUseFailure`）；支持阻塞反馈与 JSON `additionalContext`，但不支持 `updatedToolOutput` 与 `updatedMCPToolOutput`，`tool_response` 会展平为文本。
+- **`PostToolUseFailure` 只支持部分功能**——提供 `tool_name`／`tool_input`／`tool_use_id`／`error`／`is_interrupt`，JSON `additionalContext` 会在失败结果之后附加，但省略 `duration_ms` 与 `mcp_server`，`deny` 决策会被警告并忽略（Claude Code 在该事件上只提供 `additionalContext`）。分派前取消、本桥接自身的 `PreToolUse` 拒绝与审批拒绝不触发事件，与 Claude Code 一致；流经工具管线的其他 DSH 策略拒绝（例如 sandbox 守卫）会触发，这与 Claude Code 存在差异——后者只对已启动的工具主体触发该事件。
+- **`PreCompact` 与 `PostCompact` 只观测**——hook 在持久化 `compaction/start`／`compaction/end` 标记发布时运行，此时事务已经开启，因此阻塞 `PreCompact` 无法取消压缩（deny 会被警告并忽略）。`trigger` 由轮次封装推导（独立压缩为 `manual`，开放轮次内的压力压缩为 `auto`），`custom_instructions` 始终为 `null`（harness 压缩 seam 不接受指令），`compact_summary` 携带配对的摘要文本，且来自这些 hook 的 `additionalContext`／`systemMessage` 会被警告而不注入，与 Claude Code 的无控制契约一致。出错的压缩结束不运行 `PostCompact` hook。
 - **`SubagentStart` 与 `SubagentStop` 只支持部分功能**——两者均报告常量 `agent_type` `general-purpose`，并在 Claude Code 报告父会话的位置使用 child 会话 id。Start 上下文是尽力而为，且只能到达仍在运行的同进程 child；stop 只观测，无法阻塞 subagent 或向其提供上下文。Stop 省略 `agent_transcript_path`、`last_assistant_message`、`background_tasks` 与 `session_crons`，并始终报告 `stop_hook_active: false`。
 - **`Stop` 只支持部分功能**——阻塞会强制另一个模型轮次，但 `stop_hook_active` 始终为 `false`，会省略 `last_assistant_message`、`background_tasks` 与 `session_crons`，且未实现连续阻塞上限。因此，无条件阻塞 hook 会在每个步骤中强制 continuation，除非它自我限制。
-- **通用 payload 与输出字段只支持部分功能**——已映射事件会省略 Claude Code 原本会提供的 `prompt_id`、`permission_mode` 与 `effort`，且 `transcript_path` 永不填充：它始终为空字符串，因为持久化 seam 不暴露产物路径，且默认使用 Zstandard 压缩的会话日志无法被 hook 脚本读取。`systemMessage` 会被记录 + 警告但不呈现；`{"continue": false}` 会被记录但不会停止运行；`suppressOutput`、`stopReason` 与 `terminalSequence` 不会被应用。
+- **通用 payload 与输出字段只支持部分功能**——已映射事件会省略 Claude Code 原本会提供的 `prompt_id`、`permission_mode` 与 `effort`，且 `transcript_path` 永不填充：它始终为空字符串，因为持久化 seam 不暴露产物路径，且默认使用 Zstandard 压缩的会话日志无法被 hook 脚本读取。`systemMessage` 会被警告并记录到 `hook/result`，但没有面向操作者的呈现；`{"continue": false}` 会被记录但不会停止运行；`suppressOutput`、`stopReason` 与 `terminalSequence` 不会被应用。
 - **Handler 与配置只支持部分功能**——只运行 shell 形态 command handler。会跳过 `http`、`mcp_tool`、`prompt` 与 `agent` handler；`args`、`async`、`asyncRewake`、`shell`、`if`、`once` 与 `statusMessage` 等 command handler 选项不会被遵循。匹配 handler 串行运行且不去重，而 Claude Code 会并行运行并对相同 handler 去重。一个进程级 `configPath` 会在加载时解析一次；尚未实现 Claude Code 的分层项目、用户、插件与策略发现以及实时重新加载。
 
 <a id="dev-note"></a>

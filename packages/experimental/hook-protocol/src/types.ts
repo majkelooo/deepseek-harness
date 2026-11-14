@@ -35,6 +35,12 @@ declare module '@deepseek-ai/dsh-session/types' {
       decision: string
       exitCode?: number
       stderrSummary?: string
+      /**
+       * The operator-facing notice a hook asked the host to display. No
+       * interception point surfaces it in the model conversation; persisting it
+       * here keeps the request inspectable from the durable log.
+       */
+      systemMessage?: string
       durationMs: number
     }
   }

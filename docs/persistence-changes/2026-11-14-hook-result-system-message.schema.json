@@ -1,0 +1,15 @@
+{
+  "formatVersion": 2,
+  "roots": [
+    {"key":"event:hook/result","kind":"event","event":"hook/result","surface":false,"digest":"f2e8147aa080c5ca7da0dd6ba775373acdd02cdd1f52f9a0b31442835cac3be0"}
+  ],
+  "types": [],
+  "nodes": {
+    "0657d3ca5ac4e7bf": {"kind":"primitive","type":"number"},
+    "4cd48f3e5108bd6e": {"kind":"primitive","type":"string"},
+    "a3a259a1aa5401af": {"kind":"literal","value":"hook/result"},
+    "dacf3d5f3e4ff619": {"kind":"literal","value":true},
+    "f2e8147aa080c5ca": {"kind":"object","properties":[{"name":"data","type":"fd3cc129c87093c3","optional":false},{"name":"ignorable","type":"dacf3d5f3e4ff619","optional":true},{"name":"seq","type":"0657d3ca5ac4e7bf","optional":false},{"name":"time","type":"0657d3ca5ac4e7bf","optional":false},{"name":"type","type":"a3a259a1aa5401af","optional":false}],"indices":[]},
+    "fd3cc129c87093c3": {"kind":"object","properties":[{"name":"decision","type":"4cd48f3e5108bd6e","optional":false},{"name":"durationMs","type":"0657d3ca5ac4e7bf","optional":false},{"name":"exitCode","type":"0657d3ca5ac4e7bf","optional":true},{"name":"handlerId","type":"4cd48f3e5108bd6e","optional":false},{"name":"point","type":"4cd48f3e5108bd6e","optional":false},{"name":"stderrSummary","type":"4cd48f3e5108bd6e","optional":true},{"name":"systemMessage","type":"4cd48f3e5108bd6e","optional":true},{"name":"turn","type":"0657d3ca5ac4e7bf","optional":false}],"indices":[]}
+  }
+}

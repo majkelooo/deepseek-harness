@@ -13,9 +13,12 @@ const CLAUDE_EVENTS = [
   'UserPromptSubmit',
   'PreToolUse',
   'PostToolUse',
+  'PostToolUseFailure',
   'Stop',
   'SubagentStart',
   'SubagentStop',
+  'PreCompact',
+  'PostCompact',
 ] as const
 
 /** A parsed CC config: event name → its matcher groups (command hooks only). */

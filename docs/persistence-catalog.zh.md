@@ -44,7 +44,7 @@
 | `event:feedback/record` | event | `b54940ff095c17e874c5be03815f4c2145a256cf3a1d34dae4ab2f7769dfffe8` | [`{ type: "feedback/record" }`](#persistence-type-sha256-b54940ff095c17e874c5be03815f4c2145a256cf3a1d34dae4ab2f7769dfffe8) |
 | `event:goal/change` | event | `763c8a20af487263a0080548274f7437ef4a86e0ba8769127d1ced10a72c664d` | [`{ type: "goal/change" }`](#persistence-type-sha256-763c8a20af487263a0080548274f7437ef4a86e0ba8769127d1ced10a72c664d) |
 | `event:hook/invoked` | event | `8a6e1ec9e8db346b0e02f027db73c07a94f067a26d40c1aef1abd09c47ce7ba0` | [`{ type: "hook/invoked" }`](#persistence-type-sha256-8a6e1ec9e8db346b0e02f027db73c07a94f067a26d40c1aef1abd09c47ce7ba0) |
-| `event:hook/result` | event | `e75916628f3f10c2d50658bd143052a46285fbf1a9a700ba54947614603d26b4` | [`{ type: "hook/result" }`](#persistence-type-sha256-e75916628f3f10c2d50658bd143052a46285fbf1a9a700ba54947614603d26b4) |
+| `event:hook/result` | event | `f2e8147aa080c5ca7da0dd6ba775373acdd02cdd1f52f9a0b31442835cac3be0` | [`{ type: "hook/result" }`](#persistence-type-sha256-f2e8147aa080c5ca7da0dd6ba775373acdd02cdd1f52f9a0b31442835cac3be0) |
 | `event:image/offload` | event | `b222069eea2d768065161c1147b1f2c78c1b54328c84b3586ae5c8f91b8ed35e` | [`{ type: "image/offload" }`](#persistence-type-sha256-b222069eea2d768065161c1147b1f2c78c1b54328c84b3586ae5c8f91b8ed35e) |
 | `event:job/registered` | event | `f5520c1d261ca86ea03735799c311a0a9ede8babb588cf0a65422576d2ee0ad1` | [`{ type: "job/registered" }`](#persistence-type-sha256-f5520c1d261ca86ea03735799c311a0a9ede8babb588cf0a65422576d2ee0ad1) |
 | `event:job/settled` | event | `edd37b1e4974af648633014435572089b1e8fb71910468a0767a7e28fdd22abf` | [`{ type: "job/settled" }`](#persistence-type-sha256-edd37b1e4974af648633014435572089b1e8fb71910468a0767a7e28fdd22abf) |
@@ -609,6 +609,12 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
   decision: string
   exitCode?: number
   stderrSummary?: string
+  /**
+   * The operator-facing notice a hook asked the host to display. No
+   * interception point surfaces it in the model conversation; persisting it
+   * here keeps the request inspectable from the durable log.
+   */
+  systemMessage?: string
   durationMs: number
 }
 ```
@@ -3758,7 +3764,7 @@ SHA-256: `18ee62b8900a4c3d046700f05d7a4d49d6cab2a660a020c87481d1603dd8bd4f`
 
 SHA-256: `a6b41f5bede8094d7bf635be5d69b1bd7a25e006ca9cf9415bceb9322f1a7feb`
 
-来源：[`packages/experimental/hook-protocol/src/types.ts:48`](../packages/experimental/hook-protocol/src/types.ts)
+来源：[`packages/experimental/hook-protocol/src/types.ts:54`](../packages/experimental/hook-protocol/src/types.ts)
 
 以下类型之一：
 
@@ -6224,11 +6230,11 @@ SHA-256: `da60ed58a8fa23d7aa4920ab5c1f4e3d28109cb0797ef9e5c8b125721b847582`
 |---|---|---|
 | `cwd` | 必需 | `string` |
 
-<a id="persistence-type-sha256-8ad45ad053b4d89f8865c17cc9ff3b8748e86045f3f0fb816269a34af2619141"></a>
+<a id="persistence-type-sha256-fd3cc129c87093c311a15da6b330011a87e673713428fab03bc17a4b07b4ddb5"></a>
 
 ### `{ decision, durationMs, exitCode?, handlerId, … }`
 
-SHA-256: `8ad45ad053b4d89f8865c17cc9ff3b8748e86045f3f0fb816269a34af2619141`
+SHA-256: `fd3cc129c87093c311a15da6b330011a87e673713428fab03bc17a4b07b4ddb5`
 
 来源：[`packages/experimental/hook-protocol/src/types.ts:31`](../packages/experimental/hook-protocol/src/types.ts)
 
@@ -6240,6 +6246,7 @@ SHA-256: `8ad45ad053b4d89f8865c17cc9ff3b8748e86045f3f0fb816269a34af2619141`
 | `handlerId` | 必需 | `string` |
 | `point` | 必需 | `string` |
 | `stderrSummary` | 可选 | `string` |
+| `systemMessage` | 可选 | `string` |
 | `turn` | 必需 | `number` |
 
 <a id="persistence-type-sha256-cdee10e87dbed8440d8b6935888624884878efc7af95402e94171b29f173dced"></a>
@@ -8611,17 +8618,17 @@ SHA-256: `8a6e1ec9e8db346b0e02f027db73c07a94f067a26d40c1aef1abd09c47ce7ba0`
 | `time` | 必需 | `number` |
 | `type` | 必需 | `"hook/invoked"` |
 
-<a id="persistence-type-sha256-e75916628f3f10c2d50658bd143052a46285fbf1a9a700ba54947614603d26b4"></a>
+<a id="persistence-type-sha256-f2e8147aa080c5ca7da0dd6ba775373acdd02cdd1f52f9a0b31442835cac3be0"></a>
 
 <a id="persistence-type-eventhookresult"></a>
 
 ### `{ type: "hook/result" }`
 
-SHA-256: `e75916628f3f10c2d50658bd143052a46285fbf1a9a700ba54947614603d26b4`
+SHA-256: `f2e8147aa080c5ca7da0dd6ba775373acdd02cdd1f52f9a0b31442835cac3be0`
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
-| `data` | 必需 | [`{ decision, durationMs, exitCode?, handlerId, … }`](#persistence-type-sha256-8ad45ad053b4d89f8865c17cc9ff3b8748e86045f3f0fb816269a34af2619141) |
+| `data` | 必需 | [`{ decision, durationMs, exitCode?, handlerId, … }`](#persistence-type-sha256-fd3cc129c87093c311a15da6b330011a87e673713428fab03bc17a4b07b4ddb5) |
 | `ignorable` | 可选 | `true` |
 | `seq` | 必需 | `number` |
 | `time` | 必需 | `number` |

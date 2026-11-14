@@ -7,16 +7,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionId, SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
-import { brandString } from '@deepseek-ai/dsh-brand'
+import { brandNumber, brandString } from '@deepseek-ai/dsh-brand'
 import SubagentRuntime, { type SubagentRunId } from '@deepseek-ai/dsh-subagent'
 import * as HooksClaude from '@deepseek-ai/dsh-hooks-claude-code'
+// Pulls in the declaration-merged compaction session events the compact tests append.
+import type {} from '@deepseek-ai/dsh-compaction'
+import type { CompactionId } from '@deepseek-ai/dsh-compaction'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 
 /**
@@ -545,5 +548,196 @@ describe('hooks-claude-code bridge — prompt subject and tool names', () => {
 
     const payload = JSON.parse(readFileSync(capture, 'utf8'))
     expect(payload.tool_name).toBe('Bash')
+  })
+})
+
+describe('hooks-claude-code bridge — PostToolUseFailure', () => {
+  it('a failing tool reaches PostToolUseFailure (never PostToolUse) with the CC name and error text', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const failureCapture = join(dir, 'failure-payload.json')
+    const postRan = join(dir, 'post-ran')
+    const failureSpy = join(dir, 'failure-spy.sh')
+    const postSpy = join(dir, 'post-spy.sh')
+    writeFileSync(failureSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(failureCapture)}\n`)
+    writeFileSync(postSpy, `#!/usr/bin/env bash\ntouch "${postRan}"\n`)
+    chmodSync(failureSpy, 0o755)
+    chmodSync(postSpy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
+      PostToolUse: [{ hooks: [{ type: 'command', command: postSpy }] }],
+      PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ type: 'command', command: failureSpy }] }],
+    } }))
+
+    const adapter = new MockAdapter([toolCallResponse('c1', 'bash', { command: 'npm test' }), textResponse('done')])
+    const ctx = await harness(dir, adapter)
+    ctx.tools.register(defineContentToolFixture({ name: 'bash', description: 'b', parameters: {}, async execute() { throw new Error('boom: module not found') } }))
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('f1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const payload = JSON.parse(readFileSync(failureCapture, 'utf8'))
+    expect(payload.hook_event_name).toBe('PostToolUseFailure')
+    expect(payload.tool_name).toBe('Bash')
+    expect(payload.tool_input).toEqual({ command: 'npm test' })
+    expect(payload.error).toContain('boom: module not found')
+    expect(payload.is_interrupt).toBe(false)
+    // Claude Code runs PostToolUse for successful calls only.
+    await waitForIdle(ctx, agent)
+    expect(existsSync(postRan)).toBe(false)
+  })
+
+  it('a successful tool reaches PostToolUse and never PostToolUseFailure', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const failureRan = join(dir, 'failure-ran')
+    const postRan = join(dir, 'post-ran')
+    const failureSpy = join(dir, 'failure-spy.sh')
+    const postSpy = join(dir, 'post-spy.sh')
+    writeFileSync(failureSpy, `#!/usr/bin/env bash\ntouch "${failureRan}"\n`)
+    writeFileSync(postSpy, `#!/usr/bin/env bash\ntouch "${postRan}"\n`)
+    chmodSync(failureSpy, 0o755)
+    chmodSync(postSpy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
+      PostToolUse: [{ hooks: [{ type: 'command', command: postSpy }] }],
+      PostToolUseFailure: [{ hooks: [{ type: 'command', command: failureSpy }] }],
+    } }))
+
+    const adapter = new MockAdapter([toolCallResponse('c1', 'echo', {}), textResponse('done')])
+    const ctx = await harness(dir, adapter)
+    ctx.tools.register(defineContentToolFixture({ name: 'echo', description: 'e', parameters: {}, async execute() { return [{ type: 'text', text: 'ok' }] } }))
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('f2'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    await waitFor(() => existsSync(postRan))
+    expect(existsSync(failureRan)).toBe(false)
+  })
+
+  it('a PreToolUse deny fires no failure hook (the call was refused, not failed)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const deny = join(dir, 'deny.sh')
+    const failureRan = join(dir, 'failure-ran')
+    const failureSpy = join(dir, 'failure-spy.sh')
+    writeFileSync(deny, '#!/usr/bin/env bash\nexit 2\n')
+    writeFileSync(failureSpy, `#!/usr/bin/env bash\ntouch "${failureRan}"\n`)
+    chmodSync(deny, 0o755)
+    chmodSync(failureSpy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: deny }] }],
+      PostToolUseFailure: [{ hooks: [{ type: 'command', command: failureSpy }] }],
+    } }))
+
+    const adapter = new MockAdapter([toolCallResponse('c1', 'bash', {}), textResponse('done')])
+    const ctx = await harness(dir, adapter)
+    let ran = false
+    ctx.tools.register(defineContentToolFixture({ name: 'bash', description: 'b', parameters: {}, async execute() { ran = true; return [{ type: 'text', text: 'no' }] } }))
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('f3'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    expect(ran).toBe(false)
+    expect(existsSync(failureRan)).toBe(false)
+  })
+
+  it('additionalContext from a failure hook reaches the model after the failed result', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const s = join(dir, 'hint.sh')
+    writeFileSync(s, '#!/usr/bin/env bash\necho \'{"hookSpecificOutput":{"hookEventName":"PostToolUseFailure","additionalContext":"hint: check the lockfile first"}}\'\n')
+    chmodSync(s, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: { PostToolUseFailure: [{ hooks: [{ type: 'command', command: s }] }] } }))
+
+    const adapter = new MockAdapter([toolCallResponse('c1', 'broken', {}), textResponse('done')])
+    const ctx = await harness(dir, adapter)
+    ctx.tools.register(defineContentToolFixture({ name: 'broken', description: 'b', parameters: {}, async execute() { throw new Error('nope') } }))
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('f4'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    expect(JSON.stringify(adapter.requests[1]!.messages)).toContain('hint: check the lockfile first')
+  })
+})
+
+describe('hooks-claude-code bridge — PreCompact / PostCompact', () => {
+  /** Append a complete standalone (manual) compaction transaction: start, summary, end. */
+  function appendManualCompaction(agent: Agent, id: string, summaryText: string, error?: string): void {
+    const session = agent.session
+    const compactionId = brandString<CompactionId>(id)
+    session.append('compaction/start', { compactionId, turn: null })
+    session.append('compaction/summary', {
+      compactionId,
+      summary: [{ type: 'text', text: summaryText }],
+      shadowedRange: { start: brandNumber<SessionSeq>(1), end: brandNumber<SessionSeq>(2) },
+      shadowedSeqs: [brandNumber<SessionSeq>(1), brandNumber<SessionSeq>(2)],
+      shadowedTokenCount: 12,
+      provider: 'mock',
+      model: 'mock',
+      rawOutput: [{ type: 'text', text: summaryText }],
+      llmStreamCall: true,
+    })
+    session.append('compaction/end', { compactionId, turn: null, ...error !== undefined ? { error } : {} })
+  }
+
+  it('compact boundaries run the hooks with the turn-derived trigger and the paired summary', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const preCapture = join(dir, 'pre-payload.json')
+    const postCapture = join(dir, 'post-payload.json')
+    const preSpy = join(dir, 'pre-spy.sh')
+    const postSpy = join(dir, 'post-spy.sh')
+    writeFileSync(preSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(preCapture)}\n`)
+    writeFileSync(postSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(postCapture)}\n`)
+    chmodSync(preSpy, 0o755)
+    chmodSync(postSpy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
+      PreCompact: [{ matcher: 'manual', hooks: [{ type: 'command', command: preSpy }] }],
+      PostCompact: [{ matcher: 'manual', hooks: [{ type: 'command', command: postSpy }] }],
+    } }))
+
+    const adapter = new MockAdapter([])
+    const ctx = await harness(dir, adapter)
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('c1'), { provider: 'mock', model: 'mock' })
+    appendManualCompaction(agent, 'comp-1', 'summary of the compacted window')
+
+    await waitFor(() => existsSync(preCapture) && existsSync(postCapture))
+    const pre = JSON.parse(readFileSync(preCapture, 'utf8'))
+    const post = JSON.parse(readFileSync(postCapture, 'utf8'))
+    // turn: null marks a standalone manual transaction, so the CC matcher value is `manual`.
+    expect(pre.hook_event_name).toBe('PreCompact')
+    expect(pre.trigger).toBe('manual')
+    expect(pre.custom_instructions).toBeNull()
+    expect(pre.session_id).toBe(agent.session.header.id)
+    expect(post.hook_event_name).toBe('PostCompact')
+    expect(post.trigger).toBe('manual')
+    expect(post.compact_summary).toBe('summary of the compacted window')
+  })
+
+  it('an errored compaction end runs no PostCompact hook', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const preCapture = join(dir, 'pre-payload.json')
+    const runs = join(dir, 'post-runs')
+    const preSpy = join(dir, 'pre-spy.sh')
+    const postSpy = join(dir, 'post-spy.sh')
+    writeFileSync(preSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(preCapture)}\n`)
+    writeFileSync(postSpy, `#!/usr/bin/env bash\necho run >> "${runs}"\n`)
+    chmodSync(preSpy, 0o755)
+    chmodSync(postSpy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
+      PreCompact: [{ hooks: [{ type: 'command', command: preSpy }] }],
+      PostCompact: [{ hooks: [{ type: 'command', command: postSpy }] }],
+    } }))
+
+    const adapter = new MockAdapter([])
+    const ctx = await harness(dir, adapter)
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('c2'), { provider: 'mock', model: 'mock' })
+    // The failed transaction lands first, so its would-be run precedes the
+    // successful one; waiting for the successful run settles both.
+    appendManualCompaction(agent, 'comp-err', 'summary that never committed', 'summary failed')
+    appendManualCompaction(agent, 'comp-ok', 'committed summary')
+
+    await waitFor(() => existsSync(runs))
+    expect(readFileSync(runs, 'utf8').trim().split('\n')).toHaveLength(1)
   })
 })

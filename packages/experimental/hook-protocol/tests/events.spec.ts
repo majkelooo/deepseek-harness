@@ -55,6 +55,24 @@ describe('hook/* session events', () => {
     }
   })
 
+  it('appendHookResult persists a hook-requested systemMessage and omits it when absent', () => {
+    const session = Session.create(brandString<SessionId>('s'))
+    appendHookResult(session, {
+      turn: 1, point: 'PostToolUse', handlerId: 'h1',
+      stderrSummaryMaxChars: 500, durationMs: 3, output: output({ systemMessage: 'blocked destructive write' }),
+    })
+    const withNotice = session.snapshotEvents().find(e => e.type === 'hook/result')
+    expect(withNotice?.type === 'hook/result' && withNotice.data.systemMessage).toBe('blocked destructive write')
+
+    const session2 = Session.create(brandString<SessionId>('s2'))
+    appendHookResult(session2, {
+      turn: 1, point: 'PostToolUse', handlerId: 'h2',
+      stderrSummaryMaxChars: 500, durationMs: 3, output: output(),
+    })
+    const withoutNotice = session2.snapshotEvents().find(e => e.type === 'hook/result')
+    expect(withoutNotice?.type === 'hook/result' && 'systemMessage' in withoutNotice.data).toBe(false)
+  })
+
   it('the decision falls back to stop on continue:false, else pass', () => {
     const session = Session.create(brandString<SessionId>('s'))
     appendHookResult(session, { turn: 1, point: 'Stop', handlerId: 'halt', stderrSummaryMaxChars: 500, durationMs: 5, output: output({ continue: false }) })

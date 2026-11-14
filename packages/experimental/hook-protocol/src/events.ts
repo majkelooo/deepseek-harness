@@ -99,6 +99,7 @@ export function appendHookResult(session: Session, record: HookResultRecord): vo
     decision: output.decision ?? (output.continue === false ? 'stop' : 'pass'),
     ...output.exitCode !== undefined ? { exitCode: output.exitCode } : {},
     ...stderrSummary !== undefined ? { stderrSummary } : {},
+    ...output.systemMessage !== undefined ? { systemMessage: output.systemMessage } : {},
     durationMs: record.durationMs,
   })
 }

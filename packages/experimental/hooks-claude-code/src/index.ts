@@ -1,7 +1,8 @@
 /**
  * Bridge for unmodified Claude Code command hooks on harness interception
- * extension points. It supports SessionStart, prompt/tool pre/post, Stop, and subagent
- * start/stop. It owns Claude payloads, environment, substitution, and decision
+ * extension points. It supports SessionStart, prompt/tool pre/post (including
+ * PostToolUseFailure), Stop, subagent start/stop, and the compact boundaries.
+ * It owns Claude payloads, environment, substitution, and decision
  * mapping; shared execution and parsing live in `dsh-hook-protocol`.
  * `updatedInput` is logged and warned but not honored. Bespoke behavior should
  * use typed native plugins on the same extension points.
@@ -9,6 +10,8 @@
  */
 
 import type {} from '@deepseek-ai/dsh-working-directory'
+// Pulls in the declaration-merged compaction session events the compact hooks observe.
+import type {} from '@deepseek-ai/dsh-compaction'
 import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -22,8 +25,8 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
-import type { UserMessage } from '@deepseek-ai/dsh-session'
-import type { PostToolDecision, PreToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
+import { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, type PostToolDecision, type PreToolDecision, type ToolExecution, type ToolExecutionResult, type ToolExecutionFailure } from '@deepseek-ai/dsh-tools'
 import {
   appendHookInvoked,
   appendHookResult,
@@ -184,7 +187,7 @@ export function apply(ctx: Context, config: Config): void {
           ctx.logger.warn(`hooks-claude-code: ${point} hook requested updatedInput, which is not yet honored (ignored)`)
         }
         if (output.systemMessage !== undefined) {
-          ctx.logger.warn(`hooks-claude-code: ${point} hook emitted a systemMessage, which is not yet surfaced (ignored)`)
+          ctx.logger.warn(`hooks-claude-code: ${point} hook emitted a systemMessage; no operator surface exists yet, so it is only recorded on hook/result`)
         }
         if (session && opts.turn !== undefined) {
           appendHookResult(session, { turn: opts.turn, point, handlerId, output, stderrSummaryMaxChars, durationMs })
@@ -260,6 +263,21 @@ export function apply(ctx: Context, config: Config): void {
   // --- PostToolUse → PostToolDecision. Matcher subject is the tool name. ---
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
     const turn = lastTurn(ctx, exec.agent)
+    if (result.isError) {
+      // Claude Code runs PostToolUse for successful calls only; a failed call
+      // reaches PostToolUseFailure instead, and failures a hook never sees
+      // (cancellation before dispatch, this bridge's own PreToolUse deny, an
+      // approval denial) fire no event at all.
+      if (!failureEventFires(result)) return next()
+      const merged = await runPoint('PostToolUseFailure', ccToolName(exec.name), failurePayload(exec, result), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
+      if (merged.decision === 'deny') {
+        ctx.logger.warn('hooks-claude-code: PostToolUseFailure hook deny is not honored (the call already failed; Claude Code offers additionalContext on this event only)')
+      }
+      const context = contextFrom(merged)
+      const downstream = await next()
+      if (!context) return downstream
+      return { ...downstream, additionalContexts: prependContext(context, downstream.additionalContexts) }
+    }
     const merged = await runPoint('PostToolUse', ccToolName(exec.name), postToolPayload(exec, result), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
     const context = contextFrom(merged)
     if (merged.decision === 'deny') {
@@ -292,6 +310,36 @@ export function apply(ctx: Context, config: Config): void {
       // A blocking Stop hook forces continuation.
       const text = merged.reason ?? 'continue: blocked by Stop hook'
       agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: CONTEXT_SOURCE }))
+    }
+  })
+
+  // Compact hooks run detached off the post-commit session/event feed. By the
+  // time `compaction/start` publishes, the compaction transaction has already
+  // opened, so a PreCompact deny cannot block it (recorded as a limitation in
+  // this package's README). Claude Code offers hooks no other control on these
+  // events, so only the side effects and the hook/invoked pair remain.
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'compaction/start') {
+      const trigger = compactTrigger(event.data.turn)
+      const agent = ctx.get('agents')?.get(session.header.id)
+      detached.track(runPoint('PreCompact', trigger, preCompactPayload(session, trigger), {
+        ...agent !== undefined ? { agent } : {},
+        ...event.data.turn !== null ? { turn: event.data.turn } : {},
+        signal: detached.signal,
+      })
+        .then(merged => warnIgnoredCompactControls('PreCompact', merged, ctx))
+        .catch((error: unknown) => { ctx.logger.warn(`hooks-claude-code: PreCompact hook failed: ${String(error)}`) }))
+    } else if (event.type === 'compaction/end' && event.data.error === undefined) {
+      const trigger = compactTrigger(event.data.turn)
+      const summary = compactSummaryText(session, event.data.compactionId)
+      const agent = ctx.get('agents')?.get(session.header.id)
+      detached.track(runPoint('PostCompact', trigger, postCompactPayload(session, trigger, summary), {
+        ...agent !== undefined ? { agent } : {},
+        ...event.data.turn !== null ? { turn: event.data.turn } : {},
+        signal: detached.signal,
+      })
+        .then(merged => warnIgnoredCompactControls('PostCompact', merged, ctx))
+        .catch((error: unknown) => { ctx.logger.warn(`hooks-claude-code: PostCompact hook failed: ${String(error)}`) }))
     }
   })
 
@@ -372,9 +420,9 @@ function ccToolName(name: string): string {
   return CC_TOOL_NAMES[name] ?? name
 }
 
-function base(agent: Agent | undefined, event: string): Record<string, unknown> {
+function base(session: Session | undefined, event: string): Record<string, unknown> {
   return {
-    session_id: agent?.session.header.id ?? '',
+    session_id: session?.header.id ?? '',
     // The persistence seam exposes no artifact path; the field stays empty
     // (a durable consumer gap recorded in this package's README).
     transcript_path: '',
@@ -383,19 +431,19 @@ function base(agent: Agent | undefined, event: string): Record<string, unknown> 
 }
 
 function sessionStartPayload(agent: Agent, source: string): Record<string, unknown> {
-  return { ...base(agent, 'SessionStart'), source }
+  return { ...base(agent.session, 'SessionStart'), source }
 }
 function promptPayload(agent: Agent, content: ContentBlock[]): Record<string, unknown> {
-  return { ...base(agent, 'UserPromptSubmit'), prompt: blocksToText(content) }
+  return { ...base(agent.session, 'UserPromptSubmit'), prompt: blocksToText(content) }
 }
 function preToolPayload(exec: ToolExecution): Record<string, unknown> {
-  return { ...base(exec.agent, 'PreToolUse'), tool_name: ccToolName(exec.name), tool_input: exec.arguments, tool_use_id: exec.callId }
+  return { ...base(exec.agent?.session, 'PreToolUse'), tool_name: ccToolName(exec.name), tool_input: exec.arguments, tool_use_id: exec.callId }
 }
 function postToolPayload(exec: ToolExecution, result: ToolExecutionResult): Record<string, unknown> {
-  return { ...base(exec.agent, 'PostToolUse'), tool_name: ccToolName(exec.name), tool_input: exec.arguments, tool_use_id: exec.callId, tool_response: blocksToText(result.content) }
+  return { ...base(exec.agent?.session, 'PostToolUse'), tool_name: ccToolName(exec.name), tool_input: exec.arguments, tool_use_id: exec.callId, tool_response: blocksToText(result.content) }
 }
 function stopPayload(agent: Agent): Record<string, unknown> {
-  return { ...base(agent, 'Stop'), stop_hook_active: false }
+  return { ...base(agent.session, 'Stop'), stop_hook_active: false }
 }
 /**
  * Build a SubagentStart/SubagentStop payload from the CC base (the child's
@@ -405,9 +453,83 @@ function stopPayload(agent: Agent): Record<string, unknown> {
  */
 function subagentPayload(event: 'SubagentStart' | 'SubagentStop', info: { id: string }, child: Agent | undefined): Record<string, unknown> {
   return {
-    ...base(child, event),
+    ...base(child?.session, event),
     agent_id: info.id,
     agent_type: SUBAGENT_TYPE,
     ...event === 'SubagentStop' ? { stop_hook_active: false } : {},
+  }
+}
+
+/**
+ * Whether a failed result reaches PostToolUseFailure hooks. Claude Code fires the
+ * event when a started tool fails, never for a pre-execution refusal: cancellation
+ * before the body dispatches, this bridge's own PreToolUse deny, and an approval
+ * denial all stop the call without the hook. Other policy denials that flow through
+ * the same pipeline (for example a sandbox guard) still fire, a documented deviation.
+ */
+function failureEventFires(result: ToolExecutionFailure): boolean {
+  const { code, name } = result.error.info ?? {}
+  if (code === TOOL_ABORTED_BEFORE_DISPATCH) return false
+  if (name === HOOK_ERROR_NAME && code === HOOK_DENIED) return false
+  if (name === 'ApprovalError') return false // persisted identity, SSOT: dsh-tools error-codes.ts
+  return true
+}
+
+function failurePayload(exec: ToolExecution, result: ToolExecutionFailure): Record<string, unknown> {
+  // Claude Code's `error` mirrors the failed call's model-facing text; `is_interrupt`
+  // marks a failure that reached the host as an abort rather than a tool-reported error.
+  return {
+    ...base(exec.agent?.session, 'PostToolUseFailure'),
+    tool_name: ccToolName(exec.name),
+    tool_input: exec.arguments,
+    tool_use_id: exec.callId,
+    error: blocksToText(result.content) || result.error.message,
+    is_interrupt: result.error.info?.code === TOOL_ABORTED,
+  }
+}
+
+/** The event payload data of a `compaction/end` session event. */
+type CompactionEndData = Extract<SessionEvent, { type: 'compaction/end' }>['data']
+
+/**
+ * The CC trigger value for a compaction event. Claude Code reports `manual` for an
+ * explicit compact and `auto` for pressure compaction; the harness encodes the same
+ * split as the event's turn owner — `null` marks a standalone manual transaction
+ * between turns, a numbered owner is strictly enclosed by an automatic compaction's
+ * open turn.
+ */
+function compactTrigger(turn: CompactionEndData['turn']): 'manual' | 'auto' {
+  return turn === null ? 'manual' : 'auto'
+}
+
+/** The summary text of one compaction transaction, from its `compaction/summary` event. */
+function compactSummaryText(session: Session, compactionId: CompactionEndData['compactionId']): string {
+  const log = session.snapshotEvents()
+  for (let i = log.length - 1; i >= 0; i--) {
+    const event: SessionEvent | undefined = log[i]
+    if (event?.type === 'compaction/summary' && event.data.compactionId === compactionId) {
+      return blocksToText(event.data.summary)
+    }
+  }
+  return ''
+}
+
+function preCompactPayload(session: Session, trigger: 'manual' | 'auto'): Record<string, unknown> {
+  // Claude Code passes the operator's /compact instructions here and null otherwise;
+  // the harness compact seam accepts no instructions, so the field is always null.
+  return { ...base(session, 'PreCompact'), trigger, custom_instructions: null }
+}
+
+function postCompactPayload(session: Session, trigger: 'manual' | 'auto', compactSummary: string): Record<string, unknown> {
+  return { ...base(session, 'PostCompact'), trigger, compact_summary: compactSummary }
+}
+
+/** Warn about hook output Claude Code discards on the compact events, so the drop stays visible. */
+function warnIgnoredCompactControls(point: 'PreCompact' | 'PostCompact', merged: MergedHookOutcome, ctx: Context): void {
+  if (merged.decision === 'deny') {
+    ctx.logger.warn(`hooks-claude-code: ${point} hook deny is not honored (Claude Code offers no decision control on this event)`)
+  }
+  if (merged.additionalContext.length > 0) {
+    ctx.logger.warn(`hooks-claude-code: ${point} hook additionalContext is not honored (Claude Code offers no context injection on this event)`)
   }
 }
