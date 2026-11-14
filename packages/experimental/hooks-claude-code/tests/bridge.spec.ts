@@ -9,6 +9,7 @@ import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { SessionId, SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
@@ -656,6 +657,80 @@ describe('hooks-claude-code bridge — PostToolUseFailure', () => {
     await waitForIdle(ctx, agent)
 
     expect(JSON.stringify(adapter.requests[1]!.messages)).toContain('hint: check the lockfile first')
+  })
+
+  it('a real bash command exiting non-zero fires PostToolUseFailure (never PostToolUse) with the CC error format', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const failureCapture = join(dir, 'failure-payload.json')
+    const postRan = join(dir, 'post-ran')
+    const failureSpy = join(dir, 'failure-spy.sh')
+    const postSpy = join(dir, 'post-spy.sh')
+    writeFileSync(failureSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(failureCapture)}\n`)
+    writeFileSync(postSpy, `#!/usr/bin/env bash\ntouch "${postRan}"\n`)
+    chmodSync(failureSpy, 0o755)
+    chmodSync(postSpy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
+      PostToolUse: [{ hooks: [{ type: 'command', command: postSpy }] }],
+      PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ type: 'command', command: failureSpy }] }],
+    } }))
+
+    // The real bash tool models exit 7 as a successful result whose value carries
+    // exitCode — the case the bridge translates to Claude Code's failure event.
+    const adapter = new MockAdapter([toolCallResponse('c1', 'bash', { command: 'echo boom >&2; exit 7', description: 'fail on purpose' }), textResponse('done')])
+    const ctx = await harness(dir, adapter)
+    const SHELL_VALUE_SCHEMA = { type: 'object', properties: { exitCode: { type: 'number' } }, additionalProperties: false } as const
+    ctx.tools.register(defineTool({
+      name: 'bash', description: 'shell-shaped fixture',
+      parameters: { command: { type: 'string', required: true }, description: { type: 'string', required: true } },
+      output: { schema: SHELL_VALUE_SCHEMA, render: () => [{ type: 'text', text: 'boom\n' }] },
+      async execute() { return { exitCode: 7 } },
+    }))
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('f5'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const payload = JSON.parse(readFileSync(failureCapture, 'utf8'))
+    expect(payload.hook_event_name).toBe('PostToolUseFailure')
+    expect(payload.tool_name).toBe('Bash')
+    expect(payload.error).toMatch(/^Exit code 7\n/)
+    expect(payload.error).toContain('boom')
+    expect(payload.is_interrupt).toBe(false)
+    await waitForIdle(ctx, agent)
+    expect(existsSync(postRan)).toBe(false)
+  })
+
+  it('a real bash command exiting zero still reaches PostToolUse, never PostToolUseFailure', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-hooks-claude-'))
+    dirs.push(dir)
+    const failureRan = join(dir, 'failure-ran')
+    const postRan = join(dir, 'post-ran')
+    const failureSpy = join(dir, 'failure-spy.sh')
+    const postSpy = join(dir, 'post-spy.sh')
+    writeFileSync(failureSpy, `#!/usr/bin/env bash\ntouch "${failureRan}"\n`)
+    writeFileSync(postSpy, `#!/usr/bin/env bash\ntouch "${postRan}"\n`)
+    chmodSync(failureSpy, 0o755)
+    chmodSync(postSpy, 0o755)
+    writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
+      PostToolUse: [{ hooks: [{ type: 'command', command: postSpy }] }],
+      PostToolUseFailure: [{ hooks: [{ type: 'command', command: failureSpy }] }],
+    } }))
+
+    const adapter = new MockAdapter([toolCallResponse('c1', 'bash', { command: 'true', description: 'ok' }), textResponse('done')])
+    const ctx = await harness(dir, adapter)
+    const SHELL_VALUE_SCHEMA = { type: 'object', properties: { exitCode: { type: 'number' } }, additionalProperties: false } as const
+    ctx.tools.register(defineTool({
+      name: 'bash', description: 'shell-shaped fixture',
+      parameters: { command: { type: 'string', required: true }, description: { type: 'string', required: true } },
+      output: { schema: SHELL_VALUE_SCHEMA, render: () => [{ type: 'text', text: 'ok' }] },
+      async execute() { return { exitCode: 0 } },
+    }))
+    const agent = await ctx.agentLoop.create(brandString<SessionId>('f6'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    await waitFor(() => existsSync(postRan))
+    expect(existsSync(failureRan)).toBe(false)
   })
 })
 

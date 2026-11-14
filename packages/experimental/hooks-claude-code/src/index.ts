@@ -26,7 +26,7 @@ declare module '@deepseek-ai/dsh-llm' {
 
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
-import { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, type PostToolDecision, type PreToolDecision, type ToolExecution, type ToolExecutionResult, type ToolExecutionFailure } from '@deepseek-ai/dsh-tools'
+import { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, type PostToolDecision, type PreToolDecision, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import {
   appendHookInvoked,
   appendHookResult,
@@ -263,13 +263,14 @@ export function apply(ctx: Context, config: Config): void {
   // --- PostToolUse → PostToolDecision. Matcher subject is the tool name. ---
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
     const turn = lastTurn(ctx, exec.agent)
-    if (result.isError) {
+    const failure = ccFailureView(result)
+    if (failure !== undefined) {
       // Claude Code runs PostToolUse for successful calls only; a failed call
       // reaches PostToolUseFailure instead, and failures a hook never sees
       // (cancellation before dispatch, this bridge's own PreToolUse deny, an
       // approval denial) fire no event at all.
-      if (!failureEventFires(result)) return next()
-      const merged = await runPoint('PostToolUseFailure', ccToolName(exec.name), failurePayload(exec, result), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
+      if (!failure.fires) return next()
+      const merged = await runPoint('PostToolUseFailure', ccToolName(exec.name), failurePayload(exec, failure), { ...exec.agent ? { agent: exec.agent } : {}, turn, signal: exec.signal })
       if (merged.decision === 'deny') {
         ctx.logger.warn('hooks-claude-code: PostToolUseFailure hook deny is not honored (the call already failed; Claude Code offers additionalContext on this event only)')
       }
@@ -460,31 +461,49 @@ function subagentPayload(event: 'SubagentStart' | 'SubagentStop', info: { id: st
   }
 }
 
-/**
- * Whether a failed result reaches PostToolUseFailure hooks. Claude Code fires the
- * event when a started tool fails, never for a pre-execution refusal: cancellation
- * before the body dispatches, this bridge's own PreToolUse deny, and an approval
- * denial all stop the call without the hook. Other policy denials that flow through
- * the same pipeline (for example a sandbox guard) still fire, a documented deviation.
- */
-function failureEventFires(result: ToolExecutionFailure): boolean {
-  const { code, name } = result.error.info ?? {}
-  if (code === TOOL_ABORTED_BEFORE_DISPATCH) return false
-  if (name === HOOK_ERROR_NAME && code === HOOK_DENIED) return false
-  if (name === 'ApprovalError') return false // persisted identity, SSOT: dsh-tools error-codes.ts
-  return true
+/** The CC view of one settled call that Claude Code would report as a failure. */
+interface FailureView {
+  /** Claude Code's `error` string: the failed call's model-facing text. */
+  readonly error: string
+  /** Whether the failure reached the host as an abort rather than a tool-reported error. */
+  readonly isInterrupt: boolean
+  /** Whether the event fires at all; pre-execution refusals fire nothing. */
+  readonly fires: boolean
 }
 
-function failurePayload(exec: ToolExecution, result: ToolExecutionFailure): Record<string, unknown> {
-  // Claude Code's `error` mirrors the failed call's model-facing text; `is_interrupt`
-  // marks a failure that reached the host as an abort rather than a tool-reported error.
+/**
+ * Translate one settled result into Claude Code's success/failure split. Claude Code
+ * fires PostToolUseFailure when a started tool fails and never for a pre-execution
+ * refusal: cancellation before the body dispatches, this bridge's own PreToolUse
+ * deny, and an approval denial all stop the call without the hook (other DSH policy
+ * denials that flow through the same pipeline, such as a sandbox guard, still fire,
+ * a documented deviation). DSH additionally models a shell command's non-zero exit
+ * as a successful result whose value carries `exitCode`; Claude Code reports that
+ * case as `Exit code N` plus the command output, so the event follows the exit code.
+ */
+function ccFailureView(result: ToolExecutionResult): FailureView | undefined {
+  if (result.isError) {
+    const { code, name } = result.error.info ?? {}
+    if (code === TOOL_ABORTED_BEFORE_DISPATCH) return undefined
+    if (name === HOOK_ERROR_NAME && code === HOOK_DENIED) return undefined
+    if (name === 'ApprovalError') return undefined // persisted identity, SSOT: dsh-tools error-codes.ts
+    return { error: blocksToText(result.content) || result.error.message, isInterrupt: code === TOOL_ABORTED, fires: true }
+  }
+  const value = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const exitCode = (value as { exitCode?: unknown }).exitCode
+  if (typeof exitCode !== 'number' || exitCode === 0) return undefined
+  return { error: `Exit code ${exitCode}\n${blocksToText(result.content)}`, isInterrupt: false, fires: true }
+}
+
+function failurePayload(exec: ToolExecution, failure: FailureView): Record<string, unknown> {
   return {
     ...base(exec.agent?.session, 'PostToolUseFailure'),
     tool_name: ccToolName(exec.name),
     tool_input: exec.arguments,
     tool_use_id: exec.callId,
-    error: blocksToText(result.content) || result.error.message,
-    is_interrupt: result.error.info?.code === TOOL_ABORTED,
+    error: failure.error,
+    is_interrupt: failure.isInterrupt,
   }
 }
 
