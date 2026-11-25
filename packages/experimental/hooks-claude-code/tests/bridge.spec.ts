@@ -761,8 +761,11 @@ describe('hooks-claude-code bridge — PreCompact / PostCompact', () => {
     const postCapture = join(dir, 'post-payload.json')
     const preSpy = join(dir, 'pre-spy.sh')
     const postSpy = join(dir, 'post-spy.sh')
-    writeFileSync(preSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(preCapture)}\n`)
-    writeFileSync(postSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(postCapture)}\n`)
+    // Write through a temp file + rename: `cat > capture` makes the file visible
+    // while still empty, and the detached hook's waitFor(existsSync) could read the
+    // truncated file before the content landed (flaky under a loaded CI runner).
+    writeFileSync(preSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(preCapture)}.tmp && mv ${JSON.stringify(preCapture)}.tmp ${JSON.stringify(preCapture)}\n`)
+    writeFileSync(postSpy, `#!/usr/bin/env bash\ncat > ${JSON.stringify(postCapture)}.tmp && mv ${JSON.stringify(postCapture)}.tmp ${JSON.stringify(postCapture)}\n`)
     chmodSync(preSpy, 0o755)
     chmodSync(postSpy, 0o755)
     writeFileSync(join(dir, 'hooks.json'), JSON.stringify({ hooks: {
